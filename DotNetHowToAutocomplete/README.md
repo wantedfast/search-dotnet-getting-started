@@ -158,22 +158,22 @@ public ActionResult Suggest(bool highlights, bool fuzzy, string term)
     InitSearch();
 
     // Call suggest API and return results
-    SuggestParameters sp = new SuggestParameters()
+    SuggestOptions so = new SuggestOptions()
     {
         UseFuzzyMatching = fuzzy,
-        Top = 5
+        Size = 5
     };
 
     if (highlights)
     {
-        sp.HighlightPreTag = "<b>";
-        sp.HighlightPostTag = "</b>";
+        so.HighlightPreTag = "<b>";
+        so.HighlightPostTag = "</b>";
     }
 
-    DocumentSuggestResult resp = _indexClient.Documents.Suggest(term, "sg", sp);
+    SuggestResults<SearchDocument> suggestResult = searchClient.Suggest<SearchDocument>(term, "sg", so);
 
     // Convert the suggest query results to a list that can be displayed in the client.
-    List<string> suggestions = resp.Results.Select(x => x.Text).ToList();
+    List<string> suggestions = suggestResult.Results.Select(x => x.Text).ToList();
     return new JsonResult
     {
         JsonRequestBehavior = JsonRequestBehavior.AllowGet,
@@ -191,13 +191,14 @@ public ActionResult AutoComplete(string term)
 {
     InitSearch();
     //Call autocomplete API and return results
-    AutocompleteParameters ap = new AutocompleteParameters()
+
+    AutocompleteOptions ao = new AutocompleteOptions()
     {
-        AutocompleteMode = AutocompleteMode.OneTermWithContext,
+        Mode = AutocompleteMode.OneTermWithContext,
         UseFuzzyMatching = false,
-        Top = 5
+        Size = 5
     };
-    AutocompleteResult autocompleteResult = _indexClient.Documents.Autocomplete(term, "sg", ap);
+    AutocompleteResults autocompleteResult = searchClient.Autocomplete(term, "sg", ao);
 
     // Conver the Suggest results to a list that can be displayed in the client.
     List<string> autocomplete = autocompleteResult.Results.Select(x => x.Text).ToList();

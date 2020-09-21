@@ -1,8 +1,9 @@
 ﻿using System;
 using System.Net;
 using System.Threading.Tasks;
-using Microsoft.Azure.Search;
-using Microsoft.Azure.Search.Models;
+using Azure;
+using Azure.Search.Documents.Indexes;
+using Azure.Search.Documents.Indexes.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Rest.Azure;
 
@@ -18,9 +19,9 @@ namespace AzureSearch.SDKHowTo
             IConfigurationBuilder builder = new ConfigurationBuilder().AddJsonFile("appsettings.json");
             IConfigurationRoot configuration = builder.Build();
 
-            if (configuration["SearchServiceName"] == "Put your search service name here")
+            if (configuration["SearchServiceEndPoint"] == "Put your search service endpoint here")
             {
-                Console.Error.WriteLine("Specify SearchServiceName in appsettings.json");
+                Console.Error.WriteLine("Specify SearchServiceEndPoint in appsettings.json");
                 Environment.Exit(-1);
             }
 
@@ -42,24 +43,26 @@ namespace AzureSearch.SDKHowTo
                 Environment.Exit(-1);
             }
 
-            SearchServiceClient searchService = new SearchServiceClient(
-                searchServiceName: configuration["SearchServiceName"],
-                credentials: new SearchCredentials(configuration["SearchServiceAdminApiKey"]));
+            if (configuration["CosmosDBDatabaseName"] == "Put your Cosmos DB database name here")
+            {
+                Console.Error.WriteLine("Specify CosmosDBDatabaseName in appsettings.json");
+                Environment.Exit(-1);
+            }
+
+            SearchIndexClient indexClient = new SearchIndexClient(new Uri(configuration["SearchServiceEndPoint"]), new AzureKeyCredential(configuration["SearchServiceAdminApiKey"]));
+            SearchIndexerClient indexerClient = new SearchIndexerClient(new Uri(configuration["SearchServiceEndPoint"]), new AzureKeyCredential(configuration["SearchServiceAdminApiKey"]));
 
             Console.WriteLine("Creating index...");
-            Index index = new Index(
-                name: "hotels",
-                fields: FieldBuilder.BuildForType<Hotel>());
+            FieldBuilder fieldBuilder = new FieldBuilder();
+            var searchFields = fieldBuilder.Build(typeof(Hotel));
+            var searchIndex = new SearchIndex("hotels", searchFields);
+
             // If we have run the sample before, this index will be populated
             // We can clear the index by deleting it if it exists and creating
             // it again
-            bool exists = await searchService.Indexes.ExistsAsync(index.Name);
-            if (exists)
-            {
-                await searchService.Indexes.DeleteAsync(index.Name);
-            }
+            CleanupSearchIndexClientResources(indexClient, searchIndex);
 
-            await searchService.Indexes.CreateAsync(index);
+            indexClient.CreateOrUpdateIndex(searchIndex);
 
             Console.WriteLine("Creating data sources...");
 
@@ -69,14 +72,15 @@ namespace AzureSearch.SDKHowTo
             // changed since the last run using built in change tracking
             // See this link for more information
             // https://docs.microsoft.com/sql/relational-databases/track-changes/about-change-tracking-sql-server
-            DataSource sqlDataSource = DataSource.AzureSql(
-                name: "azure-sql",
-                sqlConnectionString: configuration["AzureSQLConnectionString"],
-                tableOrViewName: "hotels");
-            sqlDataSource.DataChangeDetectionPolicy = new SqlIntegratedChangeTrackingPolicy();
+            var dataSource =
+                new SearchIndexerDataSourceConnection(
+                    "azure-sql",
+                    SearchIndexerDataSourceType.AzureSql,
+                    configuration["AzureSQLConnectionString"],
+                    new SearchIndexerDataContainer("hotels"));
             // The SQL data source does not need to be deleted if it was already created,
             // but the connection string may need to be updated if it was changed
-            await searchService.DataSources.CreateOrUpdateAsync(sqlDataSource);
+            indexerClient.CreateDataSourceConnection(dataSource);
 
             // The JSON sample data set has a collection name of "hotels"
             // The JSON sample data set uses Cosmos DB change tracking for change detection
@@ -84,51 +88,49 @@ namespace AzureSearch.SDKHowTo
             // changed since the last run using built in change tracking
             // See this link for more information
             // https://docs.microsoft.com/azure/search/search-howto-index-cosmosdb#indexing-changed-documents
-            DataSource cosmosDbDataSource = DataSource.DocumentDb(
-                name: "cosmos-db",
-                documentDbConnectionString: configuration["CosmosDBConnectionString"],
-                collectionName: "hotels",
-                useChangeDetection: true);
+            string connectionString = configuration["CosmosDBConnectionString"];
+            string dataBaseName = configuration["CosmosDBDatabaseName"];
+            string connections = connectionString + ";Database=" + dataBaseName;
+
+            var cosmosDbDataSource = new SearchIndexerDataSourceConnection(
+                dataBaseName,
+                SearchIndexerDataSourceType.CosmosDb,
+                connections,
+                new SearchIndexerDataContainer("hotels"));
             // The Cosmos DB data source does not need to be deleted if it was already created,
             // but the connection string may need to be updated if it was changed
-            await searchService.DataSources.CreateOrUpdateAsync(cosmosDbDataSource);
+            indexerClient.CreateOrUpdateDataSourceConnection(cosmosDbDataSource);
 
             Console.WriteLine("Creating Azure SQL indexer...");
-            Indexer sqlIndexer = new Indexer(
-                name: "azure-sql-indexer",
-                dataSourceName: sqlDataSource.Name,
-                targetIndexName: index.Name,
-                schedule: new IndexingSchedule(TimeSpan.FromDays(1)));
+            var sqlIndexer = new SearchIndexer("azure-sql-indexer", dataSource.Name, searchIndex.Name)
+            {
+                Description = "Data indexer",
+            };
+
             // Indexers contain metadata about how much they have already indexed
             // If we already ran the sample, the indexer will remember that it already
             // indexed the sample data and not run again
             // To avoid this, reset the indexer if it exists
-            exists = await searchService.Indexers.ExistsAsync(sqlIndexer.Name);
-            if (exists)
-            {
-                await searchService.Indexers.ResetAsync(sqlIndexer.Name);
-            }
+            CleanupSearchIndexerClientResources(indexerClient, sqlIndexer);
 
-            await searchService.Indexers.CreateOrUpdateAsync(sqlIndexer);
+
+            indexerClient.CreateIndexer(sqlIndexer);
 
             Console.WriteLine("Creating Cosmos DB indexer...");
-            Indexer cosmosDbIndexer = new Indexer(
-                name: "cosmos-db-indexer",
-                dataSourceName: cosmosDbDataSource.Name,
-                targetIndexName: index.Name,
-                schedule: new IndexingSchedule(TimeSpan.FromDays(1)));
+            var cosmosDbIndexer = new SearchIndexer("cosmos-db-indexer", cosmosDbDataSource.Name, searchIndex.Name)
+            {
+                Description = "Data indexer",
+            };
+
 
             // Indexers contain metadata about how much they have already indexed
             // If we already ran the sample, the indexer will remember that it already
             // indexed the sample data and not run again
             // To avoid this, reset the indexer if it exists
-            exists = await searchService.Indexers.ExistsAsync(cosmosDbIndexer.Name);
-            if (exists)
-            {
-                await searchService.Indexers.ResetAsync(cosmosDbIndexer.Name);
-            }
+            CleanupSearchIndexerClientResources(indexerClient, cosmosDbIndexer);
 
-            await searchService.Indexers.CreateOrUpdateAsync(cosmosDbIndexer);
+
+            indexerClient.CreateIndexer(cosmosDbIndexer);
 
             // We created two indexer with schedules, but we also
             // want to run them immediately
@@ -136,8 +138,8 @@ namespace AzureSearch.SDKHowTo
 
             try
             {
-                await searchService.Indexers.RunAsync(sqlIndexer.Name);
-                await searchService.Indexers.RunAsync(cosmosDbIndexer.Name);
+                await indexerClient.RunIndexerAsync(sqlIndexer.Name);
+                await indexerClient.RunIndexerAsync(cosmosDbIndexer.Name);
 
             }
             catch (CloudException e) when (e.Response.StatusCode == (HttpStatusCode)429)
@@ -148,6 +150,38 @@ namespace AzureSearch.SDKHowTo
             Console.WriteLine("Press any key to continue...");
             Console.ReadKey();
             Environment.Exit(0);
+        }
+
+        private static void CleanupSearchIndexClientResources(SearchIndexClient indexClient, SearchIndex searchIndex)
+        {
+            try
+            {
+                if (indexClient.GetIndex(searchIndex.Name) != null)
+                {
+                    indexClient.DeleteIndex(searchIndex.Name);
+                }
+            }
+            catch (RequestFailedException e) when (e.Status == 404)
+            {
+                //if exception occurred and status is "Not Found", this is work as expect
+                Console.WriteLine("Failed to find index and this is because it's not there.");
+            }
+        }
+
+        private static void CleanupSearchIndexerClientResources(SearchIndexerClient indexerClient, SearchIndexer indexer)
+        {
+            try
+            {
+                if (indexerClient.GetIndexer(indexer.Name) != null)
+                {
+                    indexerClient.ResetIndexer(indexer.Name);
+                }
+            }
+            catch (RequestFailedException e) when (e.Status == 404)
+            {
+                //if exception occurred and status is "Not Found", this is work as expect
+                Console.WriteLine("Failed to find indexer and this is because it's not there.");
+            }
         }
     }
 }
